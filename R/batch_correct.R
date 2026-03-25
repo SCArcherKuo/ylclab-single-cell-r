@@ -2,7 +2,9 @@
 #'
 #' @param obj Seurat object with a PCA reduction.
 #' @param reduction Name of the reduction slot (default "pca").
-#' @return List with `points` (list of [PC1, PC2] per cell) and `variance_ratio` (numeric vector).
+#' @return List with `points` (list of [PC1, PC2] per cell) and `variance_ratio`
+#'   (numeric vector; fraction of variance explained among the PCs computed, not
+#'   total data variance — values sum to 1.0 across all returned PCs).
 #' @export
 compute_pca_coords <- function(obj, reduction = "pca") {
   emb <- Seurat::Embeddings(obj, reduction = reduction)[, 1:2]
@@ -16,7 +18,9 @@ compute_pca_coords <- function(obj, reduction = "pca") {
 #'
 #' @param obj Seurat object with layers already split by batch.
 #' @param method One of: "CCA", "RPCA", "JointPCA", "FastMNN".
-#' @param batch_column Metadata column identifying batches.
+#' @param batch_column Metadata column identifying batches. The object's RNA
+#'   layers must already be split by this column before calling this function
+#'   (Seurat v5 infers batch structure from split layer names, not this argument).
 #' @return Integrated Seurat object with a joined RNA assay.
 #' @export
 batch_correct_seurat <- function(obj, method, batch_column) {

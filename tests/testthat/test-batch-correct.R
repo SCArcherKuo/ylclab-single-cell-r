@@ -28,6 +28,7 @@ test_that("compute_pca_coords returns a list with points and variance_ratio", {
   expect_named(result, c("points", "variance_ratio"))
   expect_equal(length(result$points), ncol(obj))
   expect_true(length(result$variance_ratio) > 0)
+  expect_equal(sum(result$variance_ratio), 1.0, tolerance = 1e-6)
 })
 
 test_that("batch_correct_seurat returns a Seurat object for CCA method", {
