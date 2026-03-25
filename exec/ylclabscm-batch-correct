@@ -3,6 +3,7 @@
 library(optparse)
 library(ylclabscm)
 library(arrow)
+library(Matrix)
 library(Seurat)
 
 option_list <- list(
@@ -26,10 +27,22 @@ opts <- NULL
 
 tryCatch({
   opts <- parse_args(OptionParser(option_list = option_list))
-  # 1. Load data
-  mat <- as.matrix(arrow::read_parquet(opts$`parquet-path`))
-  row_names    <- read.table(opts$`row-path`,    header=FALSE)[[1]]
-  column_names <- read.table(opts$`column-path`, header=FALSE)[[1]]
+
+  # 1. Load data — input parquet is sparse triplet (row, col, value) with 0-based indices
+  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
+  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  row_df     <- row_df[order(row_df$index), ]
+  column_df  <- column_df[order(column_df$index), ]
+  row_names    <- row_df$sample
+  column_names <- column_df$sample
+
+  mat <- Matrix::sparseMatrix(
+    i    = sparse_df$row + 1L,
+    j    = sparse_df$col + 1L,
+    x    = sparse_df$value,
+    dims = c(length(row_names), length(column_names))
+  )
   rownames(mat) <- row_names
   colnames(mat) <- column_names
 
@@ -40,9 +53,9 @@ tryCatch({
     data.frame(row.names = column_names)
   }
 
-  # 3. Build Seurat object
+  # 3. Build Seurat object (input is pre-normalized; skip re-normalization)
   obj <- CreateSeuratObject(counts = mat, meta.data = meta)
-  obj <- NormalizeData(obj, verbose = FALSE)
+  LayerData(obj, layer = "data", assay = "RNA") <- mat
   obj <- FindVariableFeatures(obj, verbose = FALSE)
   obj <- ScaleData(obj, verbose = FALSE)
   obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
@@ -58,11 +71,19 @@ tryCatch({
   obj <- RunPCA(obj, reduction.name = "pca_after", npcs = 30, verbose = FALSE)
   pca_after <- compute_pca_coords(obj, reduction = "pca_after")
 
-  # 7. Write outputs
-  corrected_mat <- as.data.frame(as.matrix(GetAssayData(obj, assay = "RNA", layer = "data")))
-  arrow::write_parquet(corrected_mat, opts$`output-parquet`)
-  write.table(rownames(mat), opts$`output-row`,    row.names=FALSE, col.names=FALSE, quote=FALSE)
-  write.table(colnames(mat), opts$`output-column`, row.names=FALSE, col.names=FALSE, quote=FALSE)
+  # 7. Write outputs — output parquet must match input sparse triplet format
+  corrected_dense  <- GetAssayData(obj, assay = "RNA", layer = "data")
+  corrected_sparse <- Matrix::summary(Matrix::Matrix(corrected_dense, sparse = TRUE))
+  corrected_df <- data.frame(
+    row   = corrected_sparse$i - 1L,
+    col   = corrected_sparse$j - 1L,
+    value = corrected_sparse$x
+  )
+  arrow::write_parquet(corrected_df, opts$`output-parquet`)
+  write.table(data.frame(sample = row_names,    index = seq_along(row_names)    - 1L),
+              opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  write.table(data.frame(sample = column_names, index = seq_along(column_names) - 1L),
+              opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
 
   # 8. Resolve labels
   batch_labels <- if (opts$`batch-column` %in% colnames(obj@meta.data))
