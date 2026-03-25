@@ -66,8 +66,10 @@ tryCatch({
     data.frame(row.names = column_names)
   }
 
-  # 3. Build Seurat object (input is pre-normalized; use counts slot directly for PCA)
+  # 3. Build Seurat object (input is pre-normalized; populate data layer from counts so
+  #    ScaleData can find it without re-running NormalizeData)
   obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+  obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
   obj <- FindVariableFeatures(obj, verbose = FALSE)
   obj <- ScaleData(obj, verbose = FALSE)
   obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
