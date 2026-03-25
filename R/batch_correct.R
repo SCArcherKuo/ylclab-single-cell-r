@@ -24,7 +24,7 @@ compute_pca_coords <- function(obj, reduction = "pca") {
 #' @return Integrated Seurat object with a joined RNA assay.
 #' @export
 batch_correct_seurat <- function(obj, method, batch_column,
-                                 k_anchor = 5L, k_filter = 200L, k_score = 30L) {
+                                 k_anchor = 5L, k_filter = 200L, k_score = 30L, k_weight = 100L) {
   # R's switch() only evaluates the matching branch, so Seurat::FastMNNIntegration
   # (which lives in SeuratWrappers, not Seurat core) is never looked up for CCA/RPCA/JointPCA.
   integration_fn <- switch(method,
@@ -49,6 +49,7 @@ batch_correct_seurat <- function(obj, method, batch_column,
     k.anchor = k_anchor,
     k.filter = k_filter,
     k.score  = k_score,
+    k.weight = k_weight,
     verbose  = FALSE
   )
   obj <- Seurat::JoinLayers(obj)
