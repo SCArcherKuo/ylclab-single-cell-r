@@ -28,14 +28,22 @@ opts <- NULL
 tryCatch({
   opts <- parse_args(OptionParser(option_list = option_list))
 
-  # 1. Load data — input parquet is sparse triplet (row, col, value) with 0-based indices
+  # 1. Load data — input parquet is sparse triplet (row, col, value) with 0-based indices.
+  #    TSV files vary in schema: row TSV may have (mode, mass, index), column TSV (sample, index).
+  #    Use the `index` column to order; construct names from all other columns.
   sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
   row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
   column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
   row_df     <- row_df[order(row_df$index), ]
   column_df  <- column_df[order(column_df$index), ]
-  row_names    <- row_df$sample
-  column_names <- column_df$sample
+
+  make_names <- function(df) {
+    name_cols <- setdiff(colnames(df), "index")
+    if (length(name_cols) == 1) df[[name_cols]] else
+      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
+  }
+  row_names    <- make_names(row_df)
+  column_names <- make_names(column_df)
 
   mat <- Matrix::sparseMatrix(
     i    = sparse_df$row + 1L,
@@ -80,10 +88,9 @@ tryCatch({
     value = corrected_sparse$x
   )
   arrow::write_parquet(corrected_df, opts$`output-parquet`)
-  write.table(data.frame(sample = row_names,    index = seq_along(row_names)    - 1L),
-              opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
-  write.table(data.frame(sample = column_names, index = seq_along(column_names) - 1L),
-              opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  # Preserve original TSV schemas — features and cells do not change after batch correction
+  write.table(row_df,    opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  write.table(column_df, opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
 
   # 8. Resolve labels
   batch_labels <- if (opts$`batch-column` %in% colnames(obj@meta.data))
