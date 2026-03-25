@@ -72,7 +72,15 @@ tryCatch({
   obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
   obj <- FindVariableFeatures(obj, verbose = FALSE)
   obj <- ScaleData(obj, verbose = FALSE)
-  npcs <- min(30L, nrow(mat) - 1L, ncol(mat) - 1L)
+  # Cap npcs by (min batch size - 1) so FindIntegrationAnchors never exceeds
+  # the smallest batch. Fall back gracefully if batch column is absent.
+  min_batch <- if (opts$`batch-column` %in% colnames(meta) && nrow(meta) > 0) {
+    min(table(meta[[opts$`batch-column`]])) - 1L
+  } else {
+    Inf
+  }
+  npcs <- min(30L, nrow(mat) - 1L, ncol(mat) - 1L, min_batch)
+  npcs <- max(1L, as.integer(npcs))
   obj <- RunPCA(obj, npcs = npcs, verbose = FALSE)
 
   # 4. PCA before correction
