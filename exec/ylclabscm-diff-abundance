@@ -1,0 +1,170 @@
+#!/usr/bin/env Rscript
+
+library(optparse)
+library(ylclabscm)
+library(arrow)
+library(Matrix)
+library(Seurat)
+
+option_list <- list(
+  make_option("--parquet-path",         type="character", help="Input parquet file (sparse triplet)"),
+  make_option("--row-path",             type="character", help="Input row feature names TSV"),
+  make_option("--column-path",          type="character", help="Input column sample names TSV"),
+  make_option("--metadata-path",        type="character", default="", help="Optional sample metadata CSV/parquet"),
+  make_option("--cluster-labels-path",  type="character", default="", help="Cluster labels parquet from clustering step"),
+  make_option("--method",               type="character", help="bimod|ROC|t|negbinom|poisson|LR|MAST|DESeq2"),
+  make_option("--group-by",             type="character", default="cluster", help="Metadata or cluster column for grouping"),
+  make_option("--reference",            type="character", default="rest", help="Reference group for comparison"),
+  make_option("--n-top-features",       type="integer",   default=50L, help="Number of top features per group"),
+  make_option("--output-parquet",       type="character", default="differential_abundance.parquet",
+              help="Output results parquet path"),
+  make_option("--output-row",           type="character", default="row_feature_names.tsv",
+              help="Output row TSV path"),
+  make_option("--output-column",        type="character", default="column_sample_names.tsv",
+              help="Output column TSV path"),
+  make_option("--analysis-id",          type="integer",   help="analysisId (107 or 204)"),
+  make_option("--serial-number",        type="character", help="Project serial number"),
+  make_option("--dataset-uid",          type="integer",   help="Dataset UID"),
+  make_option("--output-sentinel",      type="character", default="differential_abundance_metadata.json",
+              help="Output sentinel JSON path")
+)
+opts <- NULL
+
+tryCatch({
+  opts <- parse_args(OptionParser(option_list = option_list))
+
+  # 1. Load expression matrix — sparse triplet (row, col, value) with 0-based indices
+  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
+  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  row_df     <- row_df[order(row_df$index), ]
+  column_df  <- column_df[order(column_df$index), ]
+
+  make_names <- function(df) {
+    name_cols <- setdiff(colnames(df), "index")
+    if (length(name_cols) == 1) df[[name_cols]] else
+      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
+  }
+  row_names    <- make_names(row_df)
+  column_names <- make_names(column_df)
+
+  mat <- Matrix::sparseMatrix(
+    i    = sparse_df$row + 1L,
+    j    = sparse_df$col + 1L,
+    x    = sparse_df$value,
+    dims = c(length(row_names), length(column_names))
+  )
+  rownames(mat) <- row_names
+  colnames(mat) <- column_names
+
+  # 2. Load metadata if provided
+  meta <- if (nchar(opts$`metadata-path`) > 0) {
+    mp <- opts$`metadata-path`
+    if (grepl("\\.csv$", mp, ignore.case = TRUE)) {
+      read.csv(mp, stringsAsFactors = FALSE, row.names = NULL)
+    } else {
+      as.data.frame(arrow::read_parquet(mp))
+    }
+  } else {
+    data.frame(row.names = column_names)
+  }
+
+  # 3. Load cluster labels if provided
+  cluster_labels <- NULL
+  if (nchar(opts$`cluster-labels-path`) > 0) {
+    cl_df <- as.data.frame(arrow::read_parquet(opts$`cluster-labels-path`))
+    # Cluster parquet has columns: cell, cluster
+    cluster_labels <- setNames(as.character(cl_df$cluster), as.character(cl_df$cell))
+  }
+
+  # 4. Build Seurat object
+  obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+  obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
+
+  # 5. Resolve group identities
+  group_by <- opts$`group-by`
+  if (group_by == "cluster" && !is.null(cluster_labels)) {
+    # Map cluster labels to cells in the Seurat object
+    cell_names <- colnames(obj)
+    obj$group <- cluster_labels[cell_names]
+  } else if (group_by %in% colnames(obj@meta.data)) {
+    obj$group <- as.character(obj@meta.data[[group_by]])
+  } else {
+    stop(paste("group-by column not found:", group_by,
+               "— available:", paste(colnames(obj@meta.data), collapse = ", ")))
+  }
+
+  # Remove cells with NA group labels
+  valid_cells <- !is.na(obj$group)
+  if (sum(valid_cells) < ncol(obj)) {
+    cat(sprintf("Removing %d cells with NA group labels\n", sum(!valid_cells)))
+    obj <- subset(obj, cells = colnames(obj)[valid_cells])
+  }
+
+  Idents(obj) <- "group"
+
+  # 6. Run FindAllMarkers
+  markers <- diff_abundance_seurat(obj, method = opts$method)
+
+  if (is.null(markers) || nrow(markers) == 0) {
+    stop("FindAllMarkers returned no results — check that groups have enough cells")
+  }
+
+  # 7. Convert to platform format
+  result <- format_markers_to_results(markers, method = opts$method, n_top = opts$`n-top-features`)
+
+  # 8. Write output parquet — one row per (group, feature) with stats
+  out_rows <- list()
+  for (g in names(result$results_by_group)) {
+    rd <- result$results_by_group[[g]]
+    n <- length(rd$names)
+    out_rows[[g]] <- data.frame(
+      group     = rep(g, n),
+      name      = rd$names,
+      score     = rd$scores,
+      logfc     = rd$logfoldchanges,
+      pval      = rd$pvals,
+      pval_adj  = rd$pvals_adj,
+      stringsAsFactors = FALSE
+    )
+  }
+  out_df <- do.call(rbind, out_rows)
+  arrow::write_parquet(out_df, opts$`output-parquet`)
+
+  # Preserve original TSV schemas
+  write.table(row_df,    opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  write.table(column_df, opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+
+  # 9. Write sentinel
+  write_sentinel(list(
+    serial_number    = opts$`serial-number`,
+    dataset_uid      = opts$`dataset-uid`,
+    pipeline_stage   = "analysis",
+    analysis_id      = opts$`analysis-id`,
+    storage_path     = normalizePath(opts$`output-parquet`, mustWork = FALSE),
+    row_path         = normalizePath(opts$`output-row`,     mustWork = FALSE),
+    column_path      = normalizePath(opts$`output-column`,  mustWork = FALSE),
+    status           = "completed",
+    test_method      = opts$method,
+    group_by         = group_by,
+    reference        = opts$reference,
+    groups           = result$groups,
+    results_by_group = result$results_by_group,
+    n_top_features   = opts$`n-top-features`
+  ), opts$`output-sentinel`)
+
+  cat("Done.\n")
+
+}, error = function(e) {
+  sentinel_path <- if (!is.null(opts) && nchar(opts$`output-sentinel`) > 0)
+    opts$`output-sentinel` else "differential_abundance_metadata.json"
+  write_sentinel(list(
+    serial_number  = if (!is.null(opts)) opts$`serial-number`  else NA,
+    dataset_uid    = if (!is.null(opts)) opts$`dataset-uid`    else NA,
+    pipeline_stage = "analysis",
+    analysis_id    = if (!is.null(opts)) opts$`analysis-id`    else NA,
+    status         = "failed",
+    error_message  = conditionMessage(e)
+  ), sentinel_path)
+  stop(e)
+})
