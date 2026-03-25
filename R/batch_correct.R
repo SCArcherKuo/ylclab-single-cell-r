@@ -35,11 +35,13 @@ batch_correct_seurat <- function(obj, method, batch_column) {
                "— supported: CCA, RPCA, JointPCA, FastMNN"))
   )
   integration_fn <- utils::getFromNamespace(fn_name, "Seurat")
+  npcs_used <- ncol(Seurat::Embeddings(obj, "pca"))
   obj <- Seurat::IntegrateLayers(
     object  = obj,
     method  = integration_fn,
     orig.reduction = "pca",
     new.reduction  = "integrated.dr",
+    dims    = seq_len(npcs_used),
     verbose = FALSE
   )
   obj[["RNA"]] <- Seurat::JoinLayers(obj[["RNA"]])
