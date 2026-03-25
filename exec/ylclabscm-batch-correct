@@ -66,9 +66,8 @@ tryCatch({
     data.frame(row.names = column_names)
   }
 
-  # 3. Build Seurat object (input is pre-normalized; skip re-normalization)
+  # 3. Build Seurat object (input is pre-normalized; use counts slot directly for PCA)
   obj <- CreateSeuratObject(counts = mat, meta.data = meta)
-  LayerData(obj, layer = "data", assay = "RNA") <- mat
   obj <- FindVariableFeatures(obj, verbose = FALSE)
   obj <- ScaleData(obj, verbose = FALSE)
   obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
