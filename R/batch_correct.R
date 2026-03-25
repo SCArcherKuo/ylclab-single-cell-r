@@ -24,17 +24,20 @@ compute_pca_coords <- function(obj, reduction = "pca") {
 #' @return Integrated Seurat object with a joined RNA assay.
 #' @export
 batch_correct_seurat <- function(obj, method, batch_column) {
-  # Resolve function name lazily so unavailable methods (e.g. FastMNNIntegration
-  # in Seurat core) don't crash jobs that use a different method.
-  fn_name <- switch(method,
-    CCA      = "CCAIntegration",
-    RPCA     = "RPCAIntegration",
-    JointPCA = "JointPCAIntegration",
-    FastMNN  = "FastMNNIntegration",
+  # R's switch() only evaluates the matching branch, so Seurat::FastMNNIntegration
+  # (which lives in SeuratWrappers, not Seurat core) is never looked up for CCA/RPCA/JointPCA.
+  integration_fn <- switch(method,
+    CCA      = Seurat::CCAIntegration,
+    RPCA     = Seurat::RPCAIntegration,
+    JointPCA = Seurat::JointPCAIntegration,
+    FastMNN  = {
+      if (!requireNamespace("SeuratWrappers", quietly = TRUE))
+        stop("FastMNN requires the SeuratWrappers package")
+      SeuratWrappers::FastMNNIntegration
+    },
     stop(paste("Unknown batch correction method:", method,
                "— supported: CCA, RPCA, JointPCA, FastMNN"))
   )
-  integration_fn <- utils::getFromNamespace(fn_name, "Seurat")
   npcs_used <- ncol(Seurat::Embeddings(obj, "pca"))
   obj <- Seurat::IntegrateLayers(
     object  = obj,
@@ -44,6 +47,6 @@ batch_correct_seurat <- function(obj, method, batch_column) {
     dims    = seq_len(npcs_used),
     verbose = FALSE
   )
-  obj[["RNA"]] <- Seurat::JoinLayers(obj[["RNA"]])
+  obj <- Seurat::JoinLayers(obj)
   obj
 }
