@@ -1,6 +1,6 @@
 Package: ylclabscm
 Title: YLCLab Single Cell Metabolomics R Analysis
-Version: 0.1.11
+Version: 0.1.12
 Authors@R: person("YLCLab", role = c("aut", "cre"), email = "lab@ylclab.org")
 Description: R-based analysis steps for the SCM platform (Seurat integration).
 License: MIT
