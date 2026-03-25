@@ -72,7 +72,8 @@ tryCatch({
   obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
   obj <- FindVariableFeatures(obj, verbose = FALSE)
   obj <- ScaleData(obj, verbose = FALSE)
-  obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
+  npcs <- min(30L, nrow(mat) - 1L, ncol(mat) - 1L)
+  obj <- RunPCA(obj, npcs = npcs, verbose = FALSE)
 
   # 4. PCA before correction
   pca_before <- compute_pca_coords(obj)
@@ -82,7 +83,7 @@ tryCatch({
   obj <- batch_correct_seurat(obj, method = opts$method, batch_column = opts$`batch-column`)
 
   # 6. Re-run PCA on corrected embedding
-  obj <- RunPCA(obj, reduction.name = "pca_after", npcs = 30, verbose = FALSE)
+  obj <- RunPCA(obj, reduction.name = "pca_after", npcs = npcs, verbose = FALSE)
   pca_after <- compute_pca_coords(obj, reduction = "pca_after")
 
   # 7. Write outputs — output parquet must match input sparse triplet format
