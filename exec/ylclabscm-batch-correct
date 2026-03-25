@@ -1,0 +1,103 @@
+#!/usr/bin/env Rscript
+
+library(optparse)
+library(ylclabscm)
+library(arrow)
+library(Seurat)
+
+option_list <- list(
+  make_option("--parquet-path",      type="character", help="Input parquet file"),
+  make_option("--row-path",          type="character", help="Input row feature names TSV"),
+  make_option("--column-path",       type="character", help="Input column sample names TSV"),
+  make_option("--method",            type="character", help="CCA | RPCA | JointPCA | FastMNN"),
+  make_option("--batch-column",      type="character", help="Metadata column for batch"),
+  make_option("--bio-color-label",   type="character", default="", help="Metadata column for bio groups"),
+  make_option("--analysis-id",       type="integer",   help="analysisId (103 or 203)"),
+  make_option("--serial-number",     type="character", help="Project serial number"),
+  make_option("--dataset-uid",       type="integer",   help="Dataset UID"),
+  make_option("--output-parquet",    type="character", help="Output corrected parquet path"),
+  make_option("--output-row",        type="character", help="Output row TSV path"),
+  make_option("--output-column",     type="character", help="Output column TSV path"),
+  make_option("--metadata-path",     type="character", default="", help="Optional sample metadata parquet"),
+  make_option("--output-sentinel",   type="character", default="batch_correction_metadata.json",
+              help="Output sentinel JSON path")
+)
+opts <- parse_args(OptionParser(option_list = option_list))
+
+tryCatch({
+  # 1. Load data
+  mat <- as.matrix(arrow::read_parquet(opts$`parquet-path`))
+  row_names    <- read.table(opts$`row-path`,    header=FALSE)[[1]]
+  column_names <- read.table(opts$`column-path`, header=FALSE)[[1]]
+  rownames(mat) <- row_names
+  colnames(mat) <- column_names
+
+  # 2. Load metadata if provided
+  meta <- if (nchar(opts$`metadata-path`) > 0) {
+    as.data.frame(arrow::read_parquet(opts$`metadata-path`))
+  } else {
+    data.frame(row.names = column_names)
+  }
+
+  # 3. Build Seurat object
+  obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+  obj <- NormalizeData(obj, verbose = FALSE)
+  obj <- FindVariableFeatures(obj, verbose = FALSE)
+  obj <- ScaleData(obj, verbose = FALSE)
+  obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
+
+  # 4. PCA before correction
+  pca_before <- compute_pca_coords(obj)
+
+  # 5. Split layers by batch and integrate
+  obj[["RNA"]] <- split(obj[["RNA"]], f = obj[[opts$`batch-column`]][,1])
+  obj <- batch_correct_seurat(obj, method = opts$method, batch_column = opts$`batch-column`)
+
+  # 6. Re-run PCA on corrected embedding
+  obj <- RunPCA(obj, reduction.name = "pca_after", npcs = 30, verbose = FALSE)
+  pca_after <- compute_pca_coords(obj, reduction = "pca_after")
+
+  # 7. Write outputs
+  corrected_mat <- as.data.frame(t(GetAssayData(obj, assay = "RNA", layer = "data")))
+  arrow::write_parquet(corrected_mat, opts$`output-parquet`)
+  write.table(rownames(mat), opts$`output-row`,    row.names=FALSE, col.names=FALSE, quote=FALSE)
+  write.table(colnames(mat), opts$`output-column`, row.names=FALSE, col.names=FALSE, quote=FALSE)
+
+  # 8. Resolve labels
+  batch_labels <- if (opts$`batch-column` %in% colnames(obj@meta.data))
+    as.character(obj@meta.data[[opts$`batch-column`]]) else character(0)
+  bio_labels <- if (nchar(opts$`bio-color-label`) > 0 &&
+                    opts$`bio-color-label` %in% colnames(obj@meta.data))
+    as.character(obj@meta.data[[opts$`bio-color-label`]]) else character(0)
+
+  # 9. Write sentinel
+  write_sentinel(list(
+    serial_number              = opts$`serial-number`,
+    dataset_uid                = opts$`dataset-uid`,
+    pipeline_stage             = "analysis",
+    analysis_id                = opts$`analysis-id`,
+    storage_path               = normalizePath(opts$`output-parquet`, mustWork = FALSE),
+    row_path                   = normalizePath(opts$`output-row`,     mustWork = FALSE),
+    column_path                = normalizePath(opts$`output-column`,  mustWork = FALSE),
+    pca_before                 = pca_before$points,
+    pca_after                  = pca_after$points,
+    pca_variance_ratio_before  = pca_before$variance_ratio,
+    pca_variance_ratio_after   = pca_after$variance_ratio,
+    batch_labels               = batch_labels,
+    bio_labels                 = bio_labels,
+    status                     = "completed"
+  ), opts$`output-sentinel`)
+
+  cat("Done.\n")
+
+}, error = function(e) {
+  write_sentinel(list(
+    serial_number = opts$`serial-number`,
+    dataset_uid   = opts$`dataset-uid`,
+    pipeline_stage = "analysis",
+    analysis_id   = opts$`analysis-id`,
+    status        = "failed",
+    error_message = conditionMessage(e)
+  ), opts$`output-sentinel`)
+  stop(e)
+})
