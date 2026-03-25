@@ -56,6 +56,6 @@ batch_correct_seurat <- function(obj, method, batch_column,
     k.weight = k_weight,
     verbose  = FALSE
   )
-  obj <- Seurat::JoinLayers(obj)
+  obj <- SeuratObject::JoinLayers(obj)
   obj
 }
