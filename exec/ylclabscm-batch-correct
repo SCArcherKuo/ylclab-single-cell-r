@@ -88,14 +88,14 @@ tryCatch({
 
   # 5. Split layers by batch and integrate
   #    Cap k.anchor/k.filter/k.score so they never exceed (min batch size - 1).
+  # k.filter is omitted: CCA/RPCA/JointPCA set it to NA internally via IntegrateLayers.
+  # The remaining three params must all be < (min batch size).
   k_anchor <- max(1L, min(5L,   min_batch - 1L))
-  k_filter <- max(1L, min(200L, min_batch - 1L))
   k_score  <- max(1L, min(30L,  min_batch - 1L))
   k_weight <- max(1L, min(100L, min_batch - 1L))
   obj[["RNA"]] <- split(obj[["RNA"]], f = obj[[opts$`batch-column`]][,1])
   obj <- batch_correct_seurat(obj, method = opts$method, batch_column = opts$`batch-column`,
-                              k_anchor = k_anchor, k_filter = k_filter, k_score = k_score,
-                              k_weight = k_weight)
+                              k_anchor = k_anchor, k_score = k_score, k_weight = k_weight)
 
   # 6. Re-run PCA on corrected embedding
   obj <- RunPCA(obj, reduction.name = "pca_after", npcs = npcs, verbose = FALSE)

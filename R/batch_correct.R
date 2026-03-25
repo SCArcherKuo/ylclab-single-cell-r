@@ -21,12 +21,17 @@ compute_pca_coords <- function(obj, reduction = "pca") {
 #' @param batch_column Metadata column identifying batches. The object's RNA
 #'   layers must already be split by this column before calling this function
 #'   (Seurat v5 infers batch structure from split layer names, not this argument).
+#' @param k_anchor k.anchor for FindIntegrationAnchors (default 5); must be < cells in each batch.
+#' @param k_score  k.score for FindIntegrationAnchors (default 30); must be < cells in each batch.
+#' @param k_weight k.weight for IntegrateEmbeddings (default 100); must be < cells in smallest batch.
 #' @return Integrated Seurat object with a joined RNA assay.
 #' @export
 batch_correct_seurat <- function(obj, method, batch_column,
-                                 k_anchor = 5L, k_filter = 200L, k_score = 30L, k_weight = 100L) {
+                                 k_anchor = 5L, k_score = 30L, k_weight = 100L) {
   # R's switch() only evaluates the matching branch, so Seurat::FastMNNIntegration
   # (which lives in SeuratWrappers, not Seurat core) is never looked up for CCA/RPCA/JointPCA.
+  # k.filter is intentionally omitted: CCAIntegration/RPCAIntegration/JointPCAIntegration
+  # set it to NA internally when called via IntegrateLayers (anchor filtering is off by default).
   integration_fn <- switch(method,
     CCA      = Seurat::CCAIntegration,
     RPCA     = Seurat::RPCAIntegration,
@@ -47,7 +52,6 @@ batch_correct_seurat <- function(obj, method, batch_column,
     new.reduction  = "integrated.dr",
     dims     = seq_len(npcs_used),
     k.anchor = k_anchor,
-    k.filter = k_filter,
     k.score  = k_score,
     k.weight = k_weight,
     verbose  = FALSE
