@@ -28,4 +28,5 @@ RUN Rscript -e "install.packages('/build/ylclabscm', repos=NULL, type='source')"
 
 # Wire exec scripts to PATH (R install.packages puts them in the library exec/ dir, not in PATH)
 RUN exec_dir=$(Rscript -e "cat(system.file('exec', package='ylclabscm'))") && \
-    ln -s "${exec_dir}/ylclabscm-batch-correct" /usr/local/bin/ylclabscm-batch-correct
+    ln -s "${exec_dir}/ylclabscm-batch-correct" /usr/local/bin/ylclabscm-batch-correct && \
+    ln -s "${exec_dir}/ylclabscm-cluster" /usr/local/bin/ylclabscm-cluster

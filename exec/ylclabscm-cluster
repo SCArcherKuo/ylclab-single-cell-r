@@ -1,0 +1,170 @@
+#!/usr/bin/env Rscript
+
+library(optparse)
+library(ylclabscm)
+library(arrow)
+library(Matrix)
+library(Seurat)
+
+option_list <- list(
+  make_option("--parquet-path",      type="character", help="Input parquet file (sparse triplet)"),
+  make_option("--row-path",          type="character", help="Input row feature names TSV"),
+  make_option("--column-path",       type="character", help="Input column sample names TSV"),
+  make_option("--metadata-path",     type="character", default="", help="Optional sample metadata CSV/parquet"),
+  make_option("--embedding-path",    type="character", help="Precomputed DR embedding parquet"),
+  make_option("--method",            type="character", help="Louvain-refined | SLM"),
+  make_option("--resolution",        type="double",    default=1.0, help="Clustering resolution"),
+  make_option("--n-neighbors",       type="integer",   default=15L, help="k for FindNeighbors"),
+  make_option("--color-label",       type="character", default="", help="Metadata column for visualization color"),
+  make_option("--output-parquet",    type="character", default="cluster_labels.parquet",
+              help="Output cluster labels parquet path"),
+  make_option("--output-row",        type="character", default="row_feature_names.tsv",
+              help="Output row TSV path"),
+  make_option("--output-column",     type="character", default="column_sample_names.tsv",
+              help="Output column TSV path"),
+  make_option("--analysis-id",       type="integer",   help="analysisId (105)"),
+  make_option("--serial-number",     type="character", help="Project serial number"),
+  make_option("--dataset-uid",       type="integer",   help="Dataset UID"),
+  make_option("--output-sentinel",   type="character", default="clustering_metadata.json",
+              help="Output sentinel JSON path")
+)
+opts <- NULL
+
+tryCatch({
+  opts <- parse_args(OptionParser(option_list = option_list))
+
+  # 1. Load expression matrix — sparse triplet (row, col, value) with 0-based indices
+  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
+  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  row_df     <- row_df[order(row_df$index), ]
+  column_df  <- column_df[order(column_df$index), ]
+
+  make_names <- function(df) {
+    name_cols <- setdiff(colnames(df), "index")
+    if (length(name_cols) == 1) df[[name_cols]] else
+      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
+  }
+  row_names    <- make_names(row_df)
+  column_names <- make_names(column_df)
+
+  mat <- Matrix::sparseMatrix(
+    i    = sparse_df$row + 1L,
+    j    = sparse_df$col + 1L,
+    x    = sparse_df$value,
+    dims = c(length(row_names), length(column_names))
+  )
+  rownames(mat) <- row_names
+  colnames(mat) <- column_names
+
+  # 2. Load metadata if provided
+  meta <- if (nchar(opts$`metadata-path`) > 0) {
+    mp <- opts$`metadata-path`
+    if (grepl("\\.csv$", mp, ignore.case = TRUE)) {
+      read.csv(mp, stringsAsFactors = FALSE, row.names = NULL)
+    } else {
+      as.data.frame(arrow::read_parquet(mp))
+    }
+  } else {
+    data.frame(row.names = column_names)
+  }
+
+  # 3. Build Seurat object
+  obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+  obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
+
+  # 4. Load precomputed DR embedding and inject into Seurat reduction slot
+  emb_df <- as.data.frame(arrow::read_parquet(opts$`embedding-path`))
+  # Embedding parquet has columns like: dim_1, dim_2, ... or x, y, ...
+  # Use all numeric columns as embedding dimensions
+  numeric_cols <- sapply(emb_df, is.numeric)
+  emb_matrix <- as.matrix(emb_df[, numeric_cols, drop = FALSE])
+  rownames(emb_matrix) <- colnames(obj)
+  dr_obj <- CreateDimReducObject(embeddings = emb_matrix, key = "dr_", assay = "RNA")
+  obj[["dr"]] <- dr_obj
+
+  # 5. Build neighbor graph from the precomputed embedding
+  n_dims <- ncol(emb_matrix)
+  k_param <- min(opts$`n-neighbors`, ncol(obj) - 1L)
+  k_param <- max(1L, k_param)
+  obj <- FindNeighbors(obj, reduction = "dr", dims = seq_len(n_dims),
+                       k.param = k_param, verbose = FALSE)
+
+  # 6. Run clustering
+  obj <- cluster_seurat(obj, method = opts$method, resolution = opts$resolution)
+
+  # 7. Extract cluster labels and sizes
+  cluster_labels <- as.character(obj$seurat_clusters)
+  cluster_sizes  <- as.list(table(cluster_labels))
+  n_clusters     <- length(unique(cluster_labels))
+
+  # 8. Resolve color labels from metadata
+  color_labels <- if (nchar(opts$`color-label`) > 0 &&
+                      opts$`color-label` %in% colnames(obj@meta.data)) {
+    as.character(obj@meta.data[[opts$`color-label`]])
+  } else {
+    character(0)
+  }
+
+  # 9. Write output files — cluster labels parquet + preserve original TSVs
+  cluster_df <- data.frame(
+    cell   = column_names,
+    cluster = cluster_labels,
+    stringsAsFactors = FALSE
+  )
+  arrow::write_parquet(cluster_df, opts$`output-parquet`)
+  write.table(row_df,    opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  write.table(column_df, opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+
+  # 10. Downsample to max 1000 cells for visualization
+  n_cells <- ncol(obj)
+  max_viz <- 1000L
+  if (n_cells > max_viz) {
+    set.seed(42)
+    viz_idx <- sort(sample(n_cells, max_viz))
+  } else {
+    viz_idx <- seq_len(n_cells)
+  }
+
+  # Use first 2 embedding dims for visualization
+  viz_emb <- emb_matrix[viz_idx, 1:min(2, ncol(emb_matrix)), drop = FALSE]
+  viz_embedding <- lapply(seq_len(nrow(viz_emb)), function(i) as.numeric(viz_emb[i, ]))
+  viz_cell_names <- column_names[viz_idx]
+  viz_cluster_labels <- cluster_labels[viz_idx]
+  viz_color_labels <- if (length(color_labels) > 0) color_labels[viz_idx] else character(0)
+
+  # 11. Write sentinel
+  write_sentinel(list(
+    serial_number     = opts$`serial-number`,
+    dataset_uid       = opts$`dataset-uid`,
+    pipeline_stage    = "analysis",
+    analysis_id       = opts$`analysis-id`,
+    storage_path      = normalizePath(opts$`output-parquet`, mustWork = FALSE),
+    row_path          = normalizePath(opts$`output-row`,     mustWork = FALSE),
+    column_path       = normalizePath(opts$`output-column`,  mustWork = FALSE),
+    embedding         = viz_embedding,
+    cell_names        = viz_cell_names,
+    cluster_labels    = viz_cluster_labels,
+    color_labels      = viz_color_labels,
+    cluster_sizes     = cluster_sizes,
+    dr_method         = "external",
+    clustering_method = opts$method,
+    n_clusters_found  = n_clusters,
+    status            = "completed"
+  ), opts$`output-sentinel`)
+
+  cat("Done.\n")
+
+}, error = function(e) {
+  sentinel_path <- if (!is.null(opts) && nchar(opts$`output-sentinel`) > 0)
+    opts$`output-sentinel` else "clustering_metadata.json"
+  write_sentinel(list(
+    serial_number  = if (!is.null(opts)) opts$`serial-number`  else NA,
+    dataset_uid    = if (!is.null(opts)) opts$`dataset-uid`    else NA,
+    pipeline_stage = "analysis",
+    analysis_id    = if (!is.null(opts)) opts$`analysis-id`    else NA,
+    status         = "failed",
+    error_message  = conditionMessage(e)
+  ), sentinel_path)
+  stop(e)
+})
