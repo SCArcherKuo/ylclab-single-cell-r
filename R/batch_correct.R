@@ -24,17 +24,17 @@ compute_pca_coords <- function(obj, reduction = "pca") {
 #' @return Integrated Seurat object with a joined RNA assay.
 #' @export
 batch_correct_seurat <- function(obj, method, batch_column) {
-  method_map <- list(
-    CCA      = Seurat::CCAIntegration,
-    RPCA     = Seurat::RPCAIntegration,
-    JointPCA = Seurat::JointPCAIntegration,
-    FastMNN  = Seurat::FastMNNIntegration
-  )
-  integration_fn <- method_map[[method]]
-  if (is.null(integration_fn)) {
+  # Resolve function name lazily so unavailable methods (e.g. FastMNNIntegration
+  # in Seurat core) don't crash jobs that use a different method.
+  fn_name <- switch(method,
+    CCA      = "CCAIntegration",
+    RPCA     = "RPCAIntegration",
+    JointPCA = "JointPCAIntegration",
+    FastMNN  = "FastMNNIntegration",
     stop(paste("Unknown batch correction method:", method,
                "— supported: CCA, RPCA, JointPCA, FastMNN"))
-  }
+  )
+  integration_fn <- utils::getFromNamespace(fn_name, "Seurat")
   obj <- Seurat::IntegrateLayers(
     object  = obj,
     method  = integration_fn,
