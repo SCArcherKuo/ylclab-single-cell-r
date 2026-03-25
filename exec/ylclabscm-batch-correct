@@ -54,9 +54,14 @@ tryCatch({
   rownames(mat) <- row_names
   colnames(mat) <- column_names
 
-  # 2. Load metadata if provided
+  # 2. Load metadata if provided — support both parquet and CSV formats
   meta <- if (nchar(opts$`metadata-path`) > 0) {
-    as.data.frame(arrow::read_parquet(opts$`metadata-path`))
+    mp <- opts$`metadata-path`
+    if (grepl("\\.csv$", mp, ignore.case = TRUE)) {
+      read.csv(mp, stringsAsFactors = FALSE, row.names = NULL)
+    } else {
+      as.data.frame(arrow::read_parquet(mp))
+    }
   } else {
     data.frame(row.names = column_names)
   }
