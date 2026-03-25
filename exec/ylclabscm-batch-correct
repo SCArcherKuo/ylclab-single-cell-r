@@ -22,9 +22,10 @@ option_list <- list(
   make_option("--output-sentinel",   type="character", default="batch_correction_metadata.json",
               help="Output sentinel JSON path")
 )
-opts <- parse_args(OptionParser(option_list = option_list))
+opts <- NULL
 
 tryCatch({
+  opts <- parse_args(OptionParser(option_list = option_list))
   # 1. Load data
   mat <- as.matrix(arrow::read_parquet(opts$`parquet-path`))
   row_names    <- read.table(opts$`row-path`,    header=FALSE)[[1]]
@@ -58,7 +59,7 @@ tryCatch({
   pca_after <- compute_pca_coords(obj, reduction = "pca_after")
 
   # 7. Write outputs
-  corrected_mat <- as.data.frame(t(GetAssayData(obj, assay = "RNA", layer = "data")))
+  corrected_mat <- as.data.frame(as.matrix(GetAssayData(obj, assay = "RNA", layer = "data")))
   arrow::write_parquet(corrected_mat, opts$`output-parquet`)
   write.table(rownames(mat), opts$`output-row`,    row.names=FALSE, col.names=FALSE, quote=FALSE)
   write.table(colnames(mat), opts$`output-column`, row.names=FALSE, col.names=FALSE, quote=FALSE)
@@ -91,13 +92,15 @@ tryCatch({
   cat("Done.\n")
 
 }, error = function(e) {
+  sentinel_path <- if (!is.null(opts) && nchar(opts$`output-sentinel`) > 0)
+    opts$`output-sentinel` else "batch_correction_metadata.json"
   write_sentinel(list(
-    serial_number = opts$`serial-number`,
-    dataset_uid   = opts$`dataset-uid`,
+    serial_number  = if (!is.null(opts)) opts$`serial-number`  else NA,
+    dataset_uid    = if (!is.null(opts)) opts$`dataset-uid`    else NA,
     pipeline_stage = "analysis",
-    analysis_id   = opts$`analysis-id`,
-    status        = "failed",
-    error_message = conditionMessage(e)
-  ), opts$`output-sentinel`)
+    analysis_id    = if (!is.null(opts)) opts$`analysis-id`    else NA,
+    status         = "failed",
+    error_message  = conditionMessage(e)
+  ), sentinel_path)
   stop(e)
 })
