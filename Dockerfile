@@ -31,4 +31,5 @@ RUN exec_dir=$(Rscript -e "cat(system.file('exec', package='ylclabscm'))") && \
     ln -s "${exec_dir}/ylclabscm-batch-correct" /usr/local/bin/ylclabscm-batch-correct && \
     ln -s "${exec_dir}/ylclabscm-cluster" /usr/local/bin/ylclabscm-cluster && \
     ln -s "${exec_dir}/ylclabscm-diff-abundance" /usr/local/bin/ylclabscm-diff-abundance && \
-    ln -s "${exec_dir}/ylclabscm-normalize" /usr/local/bin/ylclabscm-normalize
+    ln -s "${exec_dir}/ylclabscm-normalize" /usr/local/bin/ylclabscm-normalize && \
+    ln -s "${exec_dir}/ylclabscm-reduce" /usr/local/bin/ylclabscm-reduce

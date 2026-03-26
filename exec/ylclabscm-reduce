@@ -1,0 +1,152 @@
+#!/usr/bin/env Rscript
+
+library(optparse)
+library(ylclabscm)
+library(arrow)
+library(Matrix)
+library(Seurat)
+
+option_list <- list(
+  make_option("--parquet-path",      type="character", help="Input parquet file"),
+  make_option("--row-path",          type="character", help="Input row feature names TSV"),
+  make_option("--column-path",       type="character", help="Input column sample names TSV"),
+  make_option("--metadata-path",     type="character", default="", help="Optional metadata CSV/parquet"),
+  make_option("--method",            type="character", help="ICA | SPCA"),
+  make_option("--n-pcs",             type="integer",   default=50L, help="Number of components"),
+  make_option("--n-neighbors",       type="integer",   default=20L, help="Number of neighbors for SNN graph (SPCA only)"),
+  make_option("--color-label",       type="character", default="", help="Metadata column for scatter color"),
+  make_option("--analysis-id",       type="integer",   help="analysisId (104 or 205)"),
+  make_option("--serial-number",     type="character", help="Project serial number"),
+  make_option("--dataset-uid",       type="integer",   help="Dataset UID"),
+  make_option("--output-parquet",    type="character", help="Output embedding parquet path"),
+  make_option("--output-row",        type="character", help="Output row TSV path"),
+  make_option("--output-column",     type="character", help="Output column TSV path"),
+  make_option("--output-sentinel",   type="character", default="dimension_reduction_metadata.json",
+              help="Output sentinel JSON path")
+)
+opts <- NULL
+
+tryCatch({
+  opts <- parse_args(OptionParser(option_list = option_list))
+
+  # 1. Load data — sparse triplet (row, col, value) with 0-based indices
+  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
+  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  row_df     <- row_df[order(row_df$index), ]
+  column_df  <- column_df[order(column_df$index), ]
+
+  make_names <- function(df) {
+    name_cols <- setdiff(colnames(df), "index")
+    if (length(name_cols) == 1) df[[name_cols]] else
+      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
+  }
+  row_names    <- make_names(row_df)
+  column_names <- make_names(column_df)
+
+  mat <- Matrix::sparseMatrix(
+    i    = sparse_df$row + 1L,
+    j    = sparse_df$col + 1L,
+    x    = sparse_df$value,
+    dims = c(length(row_names), length(column_names))
+  )
+  rownames(mat) <- row_names
+  colnames(mat) <- column_names
+
+  # 2. Load metadata
+  meta <- if (nchar(opts$`metadata-path`) > 0) {
+    mp <- opts$`metadata-path`
+    if (grepl("\\.csv$", mp, ignore.case = TRUE)) {
+      read.csv(mp, stringsAsFactors = FALSE, row.names = NULL)
+    } else {
+      as.data.frame(arrow::read_parquet(mp))
+    }
+  } else {
+    data.frame(row.names = column_names)
+  }
+
+  # 3. Build Seurat object — input is pre-normalized, put into data layer
+  obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+  obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
+  obj <- FindVariableFeatures(obj, verbose = FALSE)
+  obj <- ScaleData(obj, verbose = FALSE)
+
+  # 4. Run dimension reduction
+  method <- opts$method
+  n_pcs <- opts$`n-pcs`
+
+  if (method == "ICA") {
+    # Cap nics by matrix dimensions
+    nics <- min(n_pcs, nrow(mat) - 1L, ncol(mat) - 1L)
+    nics <- max(1L, as.integer(nics))
+    obj <- reduce_ica_seurat(obj, nics = nics)
+    emb <- Seurat::Embeddings(obj, reduction = "ica")[, 1:2]
+
+  } else if (method == "SPCA") {
+    # Need PCA first for FindNeighbors
+    npcs <- min(n_pcs, nrow(mat) - 1L, ncol(mat) - 1L)
+    npcs <- max(1L, as.integer(npcs))
+    obj <- Seurat::RunPCA(obj, npcs = npcs, verbose = FALSE)
+    obj <- reduce_spca_seurat(obj, npcs = npcs, n_neighbors = opts$`n-neighbors`)
+    emb <- Seurat::Embeddings(obj, reduction = "spca")[, 1:2]
+
+  } else {
+    stop(paste("Unknown R dimension reduction method:", method))
+  }
+
+  # 5. Build embedding list (list of [x, y] pairs)
+  embedding <- lapply(seq_len(nrow(emb)), function(i) as.numeric(emb[i, ]))
+  cell_names <- rownames(emb)
+
+  # 6. Color labels
+  color_labels <- NULL
+  if (nchar(opts$`color-label`) > 0 && opts$`color-label` %in% colnames(meta)) {
+    color_labels <- as.character(meta[[opts$`color-label`]])
+  }
+
+  # 7. Write output parquet (cell_name, component_1, component_2)
+  out_df <- data.frame(
+    cell_name   = cell_names,
+    component_1 = emb[, 1],
+    component_2 = emb[, 2],
+    stringsAsFactors = FALSE
+  )
+  arrow::write_parquet(out_df, opts$`output-parquet`)
+
+  # 8. Preserve row/column TSVs (features and cells don't change)
+  write.table(row_df,    opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  write.table(column_df, opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+
+  # 9. Write sentinel
+  write_sentinel(list(
+    serial_number  = opts$`serial-number`,
+    dataset_uid    = opts$`dataset-uid`,
+    pipeline_stage = "analysis",
+    analysis_id    = opts$`analysis-id`,
+    storage_path   = normalizePath(opts$`output-parquet`, mustWork = FALSE),
+    row_path       = normalizePath(opts$`output-row`,     mustWork = FALSE),
+    column_path    = normalizePath(opts$`output-column`,  mustWork = FALSE),
+    embedding      = embedding,
+    cell_names     = cell_names,
+    color_labels   = color_labels,
+    variance_ratio = NULL,
+    method         = method,
+    vip_scores     = NULL,
+    status         = "completed"
+  ), opts$`output-sentinel`)
+
+  cat("Done.\n")
+
+}, error = function(e) {
+  sentinel_path <- if (!is.null(opts) && nchar(opts$`output-sentinel`) > 0)
+    opts$`output-sentinel` else "dimension_reduction_metadata.json"
+  write_sentinel(list(
+    serial_number  = if (!is.null(opts)) opts$`serial-number`  else NA,
+    dataset_uid    = if (!is.null(opts)) opts$`dataset-uid`    else NA,
+    pipeline_stage = "analysis",
+    analysis_id    = if (!is.null(opts)) opts$`analysis-id`    else NA,
+    status         = "failed",
+    error_message  = conditionMessage(e)
+  ), sentinel_path)
+  stop(e)
+})
