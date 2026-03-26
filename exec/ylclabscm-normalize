@@ -1,0 +1,171 @@
+#!/usr/bin/env Rscript
+
+library(optparse)
+library(ylclabscm)
+library(arrow)
+library(Matrix)
+library(Seurat)
+
+option_list <- list(
+  make_option("--parquet-path",         type="character", help="Input parquet file"),
+  make_option("--row-path",             type="character", help="Input row feature names TSV"),
+  make_option("--column-path",          type="character", help="Input column sample names TSV"),
+  make_option("--metadata-path",        type="character", default="", help="Optional metadata CSV/parquet"),
+  make_option("--method",               type="character", help="SCTransform | EigenMS"),
+  make_option("--variable-features-n",  type="integer",   default=3000L, help="Number of variable features (SCTransform)"),
+  make_option("--eigenms-group-label",  type="character", default="", help="Metadata column for treatment groups (EigenMS)"),
+  make_option("--pca-color-label",      type="character", default="", help="Metadata column for PCA color"),
+  make_option("--analysis-id",          type="integer",   help="analysisId (102 or 202)"),
+  make_option("--serial-number",        type="character", help="Project serial number"),
+  make_option("--dataset-uid",          type="integer",   help="Dataset UID"),
+  make_option("--output-parquet",       type="character", help="Output normalized parquet path"),
+  make_option("--output-sentinel",      type="character", default="normalization_metadata.json",
+              help="Output sentinel JSON path")
+)
+opts <- NULL
+
+tryCatch({
+  opts <- parse_args(OptionParser(option_list = option_list))
+
+  # 1. Load data — sparse triplet (row, col, value) with 0-based indices
+  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
+  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
+  row_df     <- row_df[order(row_df$index), ]
+  column_df  <- column_df[order(column_df$index), ]
+
+  make_names <- function(df) {
+    name_cols <- setdiff(colnames(df), "index")
+    if (length(name_cols) == 1) df[[name_cols]] else
+      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
+  }
+  row_names    <- make_names(row_df)
+  column_names <- make_names(column_df)
+
+  mat <- Matrix::sparseMatrix(
+    i    = sparse_df$row + 1L,
+    j    = sparse_df$col + 1L,
+    x    = sparse_df$value,
+    dims = c(length(row_names), length(column_names))
+  )
+  rownames(mat) <- row_names
+  colnames(mat) <- column_names
+
+  # 2. Load metadata
+  meta <- if (nchar(opts$`metadata-path`) > 0) {
+    mp <- opts$`metadata-path`
+    if (grepl("\\.csv$", mp, ignore.case = TRUE)) {
+      read.csv(mp, stringsAsFactors = FALSE, row.names = NULL)
+    } else {
+      as.data.frame(arrow::read_parquet(mp))
+    }
+  } else {
+    data.frame(row.names = column_names)
+  }
+
+  # 3. Capture violin data BEFORE normalization (downsample: 50 samples x 500 features)
+  capture_violin <- function(m, sample_names) {
+    set.seed(42)
+    n_samples  <- min(50L, ncol(m))
+    n_features <- min(500L, nrow(m))
+    s_idx <- sample(ncol(m), n_samples)
+    f_idx <- sample(nrow(m), n_features)
+    result <- list()
+    for (si in s_idx) {
+      result[[sample_names[si]]] <- as.numeric(m[f_idx, si])
+    }
+    result
+  }
+
+  violin_before <- capture_violin(mat, column_names)
+
+  # 4. Normalize based on method
+  method <- opts$method
+
+  if (method == "SCTransform") {
+    # Build Seurat object from counts
+    obj <- CreateSeuratObject(counts = mat, meta.data = meta)
+    obj <- sctransform_seurat(obj, variable_features_n = opts$`variable-features-n`)
+
+    # Extract SCTransform normalized data (SCT assay, data layer)
+    normalized_dense <- GetAssayData(obj, assay = "SCT", layer = "data")
+
+  } else if (method == "EigenMS") {
+    group_col <- opts$`eigenms-group-label`
+    if (nchar(group_col) == 0 || !(group_col %in% colnames(meta))) {
+      stop("EigenMS requires --eigenms-group-label pointing to a metadata column with treatment groups")
+    }
+    group_labels <- as.character(meta[[group_col]])
+    normalized_dense <- eigenms_normalize(as.matrix(mat), group_labels)
+
+  } else {
+    stop(paste("Unknown R normalization method:", method))
+  }
+
+  # 5. Capture violin data AFTER normalization
+  violin_after <- capture_violin(normalized_dense, column_names)
+
+  # 6. Compute PCA (on subset of max 1000 samples)
+  set.seed(42)
+  n_pca <- min(1000L, ncol(normalized_dense))
+  pca_idx <- sort(sample(ncol(normalized_dense), n_pca))
+  pca_input <- t(normalized_dense[, pca_idx])  # samples x features for prcomp
+  # Remove zero-variance features
+  variances <- apply(pca_input, 2, var)
+  pca_input <- pca_input[, variances > 0, drop = FALSE]
+  pca_result <- prcomp(pca_input, center = TRUE, scale. = FALSE, rank. = 2)
+  pc1 <- as.numeric(pca_result$x[, 1])
+  pc2 <- as.numeric(pca_result$x[, 2])
+  variance_ratio <- (pca_result$sdev^2 / sum(pca_result$sdev^2))[1:2]
+
+  # PCA color labels
+  pca_color <- NULL
+  if (nchar(opts$`pca-color-label`) > 0 && opts$`pca-color-label` %in% colnames(meta)) {
+    pca_color <- as.character(meta[[opts$`pca-color-label`]])[pca_idx]
+  }
+
+  # 7. Write output parquet (sparse triplet format, 0-based indices)
+  normalized_sparse <- Matrix::summary(Matrix::Matrix(normalized_dense, sparse = TRUE))
+  out_df <- data.frame(
+    row   = normalized_sparse$i - 1L,
+    col   = normalized_sparse$j - 1L,
+    value = normalized_sparse$x
+  )
+  arrow::write_parquet(out_df, opts$`output-parquet`)
+
+  # 8. Write sentinel
+  write_sentinel(list(
+    serial_number       = opts$`serial-number`,
+    dataset_uid         = opts$`dataset-uid`,
+    pipeline_stage      = "analysis",
+    analysis_id         = opts$`analysis-id`,
+    storage_path        = normalizePath(opts$`output-parquet`, mustWork = FALSE),
+    row_path            = normalizePath(opts$`row-path`, mustWork = FALSE),
+    column_path         = normalizePath(opts$`column-path`, mustWork = FALSE),
+    normalization_mode  = "model-based",
+    model_based_method  = method,
+    scaling_method      = "none",
+    transformation      = "none",
+    do_z_score          = FALSE,
+    violin_before       = violin_before,
+    violin_after        = violin_after,
+    pca                 = list(pc1 = pc1, pc2 = pc2, color = pca_color),
+    pca_variance_ratio  = variance_ratio,
+    status              = "completed"
+  ), opts$`output-sentinel`)
+
+  cat("Done.\n")
+
+}, error = function(e) {
+  sentinel_path <- if (!is.null(opts) && nchar(opts$`output-sentinel`) > 0)
+    opts$`output-sentinel` else "normalization_metadata.json"
+  write_sentinel(list(
+    serial_number  = if (!is.null(opts)) opts$`serial-number`  else NA,
+    dataset_uid    = if (!is.null(opts)) opts$`dataset-uid`    else NA,
+    pipeline_stage = "analysis",
+    analysis_id    = if (!is.null(opts)) opts$`analysis-id`    else NA,
+    status         = "failed",
+    error_message  = conditionMessage(e)
+  ), sentinel_path)
+  stop(e)
+})

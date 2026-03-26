@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # matrixStats >= 1.4.1 is required by BiocManager's MatrixGenerics.
 RUN Rscript -e "install.packages('BiocManager', repos='https://cloud.r-project.org')" && \
     Rscript -e "install.packages('matrixStats', repos='https://cloud.r-project.org')" && \
-    Rscript -e "BiocManager::install(c('scran', 'scater', 'glmGamPoi', 'MAST', 'DESeq2'), ask=FALSE)" && \
+    Rscript -e "BiocManager::install(c('scran', 'scater', 'glmGamPoi', 'MAST', 'DESeq2', 'ProteoMM'), ask=FALSE)" && \
     Rscript -e "install.packages(c('Seurat','harmony','optparse','jsonlite','arrow'), \
                                   repos='https://cloud.r-project.org')"
 
@@ -30,4 +30,5 @@ RUN Rscript -e "install.packages('/build/ylclabscm', repos=NULL, type='source')"
 RUN exec_dir=$(Rscript -e "cat(system.file('exec', package='ylclabscm'))") && \
     ln -s "${exec_dir}/ylclabscm-batch-correct" /usr/local/bin/ylclabscm-batch-correct && \
     ln -s "${exec_dir}/ylclabscm-cluster" /usr/local/bin/ylclabscm-cluster && \
-    ln -s "${exec_dir}/ylclabscm-diff-abundance" /usr/local/bin/ylclabscm-diff-abundance
+    ln -s "${exec_dir}/ylclabscm-diff-abundance" /usr/local/bin/ylclabscm-diff-abundance && \
+    ln -s "${exec_dir}/ylclabscm-normalize" /usr/local/bin/ylclabscm-normalize
