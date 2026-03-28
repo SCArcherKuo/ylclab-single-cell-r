@@ -15,6 +15,7 @@ option_list <- list(
   make_option("--n-pcs",             type="integer",   default=50L, help="Number of components"),
   make_option("--n-neighbors",       type="integer",   default=20L, help="Number of neighbors for SNN graph (SPCA only)"),
   make_option("--color-label",       type="character", default="", help="Metadata column for scatter color"),
+  make_option("--feature-filter-path", type="character", default="", help="Optional file with one feature name per line for DAM filtering"),
   make_option("--analysis-id",       type="integer",   help="analysisId (104 or 205)"),
   make_option("--serial-number",     type="character", help="Project serial number"),
   make_option("--dataset-uid",       type="integer",   help="Dataset UID"),
@@ -52,6 +53,20 @@ tryCatch({
   )
   rownames(mat) <- row_names
   colnames(mat) <- column_names
+
+  # Apply optional DAM feature filter
+  if (nchar(opts$`feature-filter-path`) > 0) {
+    filter_names <- readLines(opts$`feature-filter-path`)
+    keep <- row_names %in% filter_names
+    if (sum(keep) == 0L) {
+      stop(sprintf("No features remain after DAM filtering (%d filter features, %d matrix features, 0 overlap)",
+                   length(filter_names), length(row_names)))
+    }
+    cat(sprintf("DAM filter applied: %d of %d features retained\n", sum(keep), length(row_names)))
+    mat <- mat[keep, , drop = FALSE]
+    row_names <- row_names[keep]
+    row_df <- row_df[keep, , drop = FALSE]
+  }
 
   # 2. Load metadata
   meta <- if (nchar(opts$`metadata-path`) > 0) {

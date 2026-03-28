@@ -50,15 +50,12 @@ format_markers_to_results <- function(markers, method, n_top = 50L) {
       scores <- -log10(pvals) * sign(gdf$avg_log2FC)
     }
 
-    # Sort by absolute score descending
+    # Sort by absolute score descending (store ALL features, not just top N —
+    # the barchart top-N limiting is handled by the result formatter, and
+    # downstream steps like DAM-filtered DR need the full feature list)
     ord <- order(abs(scores), decreasing = TRUE)
     gdf <- gdf[ord, , drop = FALSE]
     scores <- scores[ord]
-
-    # Take top N
-    n <- min(n_top, nrow(gdf))
-    gdf <- gdf[seq_len(n), , drop = FALSE]
-    scores <- scores[seq_len(n)]
 
     results_by_group[[g]] <- list(
       names          = as.character(gdf$gene),
