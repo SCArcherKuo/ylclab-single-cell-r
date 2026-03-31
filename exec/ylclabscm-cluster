@@ -34,28 +34,11 @@ tryCatch({
   opts <- parse_args(OptionParser(option_list = option_list))
 
   # 1. Load expression matrix — sparse triplet (row, col, value) with 0-based indices
-  sparse_df  <- arrow::read_parquet(opts$`parquet-path`)
-  row_df     <- read.table(opts$`row-path`,    header=TRUE, sep="\t", stringsAsFactors=FALSE)
-  column_df  <- read.table(opts$`column-path`, header=TRUE, sep="\t", stringsAsFactors=FALSE)
-  row_df     <- row_df[order(row_df$index), ]
-  column_df  <- column_df[order(column_df$index), ]
+  loaded <- load_coo_parquet(opts$`parquet-path`, opts$`row-path`, opts$`column-path`)
+  mat          <- loaded$mat
+  row_names    <- loaded$row_names
+  column_names <- loaded$column_names
 
-  make_names <- function(df) {
-    name_cols <- setdiff(colnames(df), "index")
-    if (length(name_cols) == 1) df[[name_cols]] else
-      apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_")
-  }
-  row_names    <- make_names(row_df)
-  column_names <- make_names(column_df)
-
-  mat <- Matrix::sparseMatrix(
-    i    = sparse_df$row + 1L,
-    j    = sparse_df$col + 1L,
-    x    = sparse_df$value,
-    dims = c(length(row_names), length(column_names))
-  )
-  rownames(mat) <- row_names
-  colnames(mat) <- column_names
 
   # 2. Load metadata if provided
   meta <- if (nchar(opts$`metadata-path`) > 0) {
@@ -113,8 +96,8 @@ tryCatch({
     stringsAsFactors = FALSE
   )
   arrow::write_parquet(cluster_df, opts$`output-parquet`)
-  write.table(row_df,    opts$`output-row`,    row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
-  write.table(column_df, opts$`output-column`, row.names = FALSE, col.names = TRUE, quote = FALSE, sep = "\t")
+  writeLines(row_names,    opts$`output-row`)
+  writeLines(column_names, opts$`output-column`)
 
   # 10. Downsample to max 1000 cells for visualization
   n_cells <- ncol(obj)
