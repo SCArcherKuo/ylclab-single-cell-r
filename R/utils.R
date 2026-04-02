@@ -59,15 +59,16 @@ load_coo_parquet <- function(parquet_path, row_path, column_path) {
   row_names    <- row_info$names
   column_names <- col_info$names
 
-  # Remap sparse indices through the name TSV mapping
-  # Original indices may be non-consecutive (e.g., after filtration)
+  # Remap sparse indices through the name TSV mapping.
+  # Original indices may be non-consecutive (e.g., after filtration keeps
+  # a subset of original preparation indices).
   mapped_i <- row_info$index_map[as.character(sparse_df$row)]
   mapped_j <- col_info$index_map[as.character(sparse_df$col)]
 
-  # Drop entries that don't map (shouldn't happen, but defensive)
   valid <- !is.na(mapped_i) & !is.na(mapped_j)
   if (sum(!valid) > 0) {
-    warning(sprintf("load_coo_parquet: dropped %d entries with unmapped indices", sum(!valid)))
+    message(sprintf("load_coo_parquet: remapping filtered out %d/%d entries (%.1f%% — expected for filtered data)",
+                    sum(!valid), length(valid), 100 * sum(!valid) / length(valid)))
   }
 
   mat <- Matrix::sparseMatrix(
