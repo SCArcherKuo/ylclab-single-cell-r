@@ -48,7 +48,6 @@ tryCatch({
     cat(sprintf("DAM filter applied: %d of %d features retained\n", sum(keep), length(row_names)))
     mat <- mat[keep, , drop = FALSE]
     row_names <- row_names[keep]
-    row_df <- row_df[keep, , drop = FALSE]
   }
 
   # 2. Load metadata
