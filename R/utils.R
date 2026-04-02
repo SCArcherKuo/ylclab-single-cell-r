@@ -59,15 +59,31 @@ load_coo_parquet <- function(parquet_path, row_path, column_path) {
   row_names    <- row_info$names
   column_names <- col_info$names
 
-  # Remap sparse indices through the name TSV mapping.
-  # Original indices may be non-consecutive (e.g., after filtration keeps
-  # a subset of original preparation indices).
-  mapped_i <- row_info$index_map[as.character(sparse_df$row)]
-  mapped_j <- col_info$index_map[as.character(sparse_df$col)]
+  # Detect whether parquet uses integer indices or string names.
+  # Python normalization/batch correction write string names (e.g., "positive_999.814").
+  # Python filtration/preparation write integer indices (e.g., 12345).
+  row_is_string <- is.character(sparse_df$row)
+  col_is_string <- is.character(sparse_df$col)
+
+  if (row_is_string) {
+    # Parquet uses feature names directly — build name→position map
+    name_map_row <- setNames(seq_along(row_names), row_names)
+    mapped_i <- name_map_row[sparse_df$row]
+  } else {
+    # Parquet uses integer indices — remap through TSV index map
+    mapped_i <- row_info$index_map[as.character(sparse_df$row)]
+  }
+
+  if (col_is_string) {
+    name_map_col <- setNames(seq_along(column_names), column_names)
+    mapped_j <- name_map_col[sparse_df$col]
+  } else {
+    mapped_j <- col_info$index_map[as.character(sparse_df$col)]
+  }
 
   valid <- !is.na(mapped_i) & !is.na(mapped_j)
   if (sum(!valid) > 0) {
-    message(sprintf("load_coo_parquet: remapping filtered out %d/%d entries (%.1f%% — expected for filtered data)",
+    message(sprintf("load_coo_parquet: remapping filtered out %d/%d entries (%.1f%%)",
                     sum(!valid), length(valid), 100 * sum(!valid) / length(valid)))
   }
 
