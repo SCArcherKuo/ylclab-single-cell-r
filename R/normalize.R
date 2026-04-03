@@ -32,20 +32,17 @@ eigenms_normalize <- function(mat, group_labels) {
   # a "treatment" column and protein columns. We use eig_norm2 which is
   # the two-step wrapper: eig_norm1 (bias estimation) then eig_norm2 (correction).
 
-  # Input: mat is features x samples. EigenMS wants samples x proteins (features).
-  df <- as.data.frame(t(mat))
-  df$treatment <- group_labels
+  # Input: mat is features x samples.
+  # eig_norm1 expects m = features x samples (rows = proteins/features).
 
-  # eig_norm1: estimate bias eigenvectors
   grp <- factor(group_labels)
-  # Create the model matrix for ANOVA
-  m_ints <- as.matrix(df[, seq_len(ncol(df) - 1)])  # exclude treatment column
 
   # Use log2 transform for EigenMS (expects log-scale data)
-  m_ints_log <- log2(m_ints + 1)
+  m_log <- log2(mat + 1)
 
-  ep <- ProteoMM::eig_norm1(m = m_ints_log, treatment = grp, prot.info = data.frame(
-    prot_name = colnames(m_ints),
+  # prot.info: one row per feature (= row of mat)
+  ep <- ProteoMM::eig_norm1(m = m_log, treatment = grp, prot.info = data.frame(
+    prot_name = rownames(mat),
     stringsAsFactors = FALSE
   ))
 
@@ -53,10 +50,10 @@ eigenms_normalize <- function(mat, group_labels) {
   en <- ProteoMM::eig_norm2(rv = ep)
 
   # Extract normalized matrix and convert back from log2
+  # en$norm_m is features x samples (same orientation as input)
   normalized_log <- en$norm_m
   normalized <- (2^normalized_log) - 1
   normalized[normalized < 0] <- 0
 
-  # Return features x samples matrix
-  t(as.matrix(normalized))
+  as.matrix(normalized)
 }
