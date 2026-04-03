@@ -1,5 +1,8 @@
 #!/usr/bin/env Rscript
 
+# Raise future.globals.maxSize for Seurat parallel operations with large feature counts
+options(future.globals.maxSize = 1024 * 1024^2)  # 1 GiB
+
 library(optparse)
 library(ylclabscm)
 library(arrow)
