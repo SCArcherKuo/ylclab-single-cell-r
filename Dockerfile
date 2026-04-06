@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN Rscript -e "install.packages('BiocManager', repos='https://cloud.r-project.org')" && \
     Rscript -e "install.packages('matrixStats', repos='https://cloud.r-project.org')" && \
     Rscript -e "BiocManager::install(c('scran', 'scater', 'glmGamPoi', 'MAST', 'DESeq2', 'ProteoMM'), ask=FALSE)" && \
-    Rscript -e "install.packages(c('Seurat','harmony','optparse','jsonlite','arrow'), \
+    Rscript -e "install.packages(c('Seurat','harmony','optparse','jsonlite','arrow','duckdb','DBI'), \
                                   repos='https://cloud.r-project.org')"
 
 # Layer 3: ylclabscm package (rebuilt on each release)

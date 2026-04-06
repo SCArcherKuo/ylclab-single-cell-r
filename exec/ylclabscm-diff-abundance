@@ -16,6 +16,7 @@ option_list <- list(
   make_option("--group-by",             type="character", default="cluster", help="Metadata or cluster column for grouping"),
   make_option("--reference",            type="character", default="rest", help="Reference group for comparison"),
   make_option("--n-top-features",       type="integer",   default=50L, help="Number of top features per group"),
+  make_option("--chunk-size",           type="integer",   default=10000L, help="Features per processing chunk"),
   make_option("--output-parquet",       type="character", default="differential_abundance.parquet",
               help="Output results parquet path"),
   make_option("--output-row",           type="character", default="row_feature_names.tsv",
@@ -33,12 +34,23 @@ opts <- NULL
 tryCatch({
   opts <- parse_args(OptionParser(option_list = option_list))
 
-  # 1. Load expression matrix — sparse triplet (row, col, value) with 0-based indices
-  loaded <- load_coo_parquet(opts$`parquet-path`, opts$`row-path`, opts$`column-path`)
-  mat          <- loaded$mat
-  row_names    <- loaded$row_names
-  column_names <- loaded$column_names
+  # 1. Read feature and sample names directly (no full matrix load)
+  read_name_list <- function(path) {
+    first_line <- readLines(path, n = 1)
+    if (grepl("\t", first_line)) {
+      df <- read.table(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+      if ("index" %in% colnames(df)) {
+        df <- df[order(df$index), ]
+        name_cols <- setdiff(colnames(df), "index")
+        if (length(name_cols) == 1) return(df[[name_cols]])
+        return(apply(df[, name_cols, drop = FALSE], 1, paste, collapse = "_"))
+      }
+    }
+    readLines(path)
+  }
 
+  row_names    <- read_name_list(opts$`row-path`)
+  column_names <- read_name_list(opts$`column-path`)
 
   # 2. Load metadata if provided
   meta <- if (nchar(opts$`metadata-path`) > 0) {
@@ -60,65 +72,57 @@ tryCatch({
     cluster_labels <- setNames(as.character(cl_df$cluster), as.character(cl_df$cell))
   }
 
-  # 4. Build Seurat object
-  obj <- CreateSeuratObject(counts = mat, meta.data = meta)
-  obj <- SetAssayData(obj, layer = "data", new.data = GetAssayData(obj, layer = "counts"))
-
-  # 5. Resolve group identities
+  # 4. Resolve group labels (named character vector: sample -> group)
   group_by <- opts$`group-by`
   if (group_by == "cluster" && !is.null(cluster_labels)) {
-    # Map cluster labels to cells in the Seurat object
-    cell_names <- colnames(obj)
-    obj$group <- cluster_labels[cell_names]
-  } else if (group_by %in% colnames(obj@meta.data)) {
-    obj$group <- as.character(obj@meta.data[[group_by]])
+    group_labels <- cluster_labels[column_names]
+  } else if (group_by %in% colnames(meta)) {
+    group_labels <- setNames(as.character(meta[[group_by]]), column_names)
   } else {
     stop(paste("group-by column not found:", group_by,
-               "— available:", paste(colnames(obj@meta.data), collapse = ", ")))
+               "— available:", paste(colnames(meta), collapse = ", ")))
   }
 
-  # Remove cells with NA group labels
-  valid_cells <- !is.na(obj$group)
-  if (sum(valid_cells) < ncol(obj)) {
-    cat(sprintf("Removing %d cells with NA group labels\n", sum(!valid_cells)))
-    obj <- subset(obj, cells = colnames(obj)[valid_cells])
+  # Remove samples with NA group labels
+  valid <- !is.na(group_labels)
+  if (sum(!valid) > 0) {
+    cat(sprintf("Removing %d samples with NA group labels\n", sum(!valid)))
+    column_names <- column_names[valid]
+    group_labels <- group_labels[valid]
   }
 
-  Idents(obj) <- "group"
+  # 5. Run chunked differential abundance
+  da_result <- diff_abundance_chunked(
+    parquet_path  = opts$`parquet-path`,
+    row_names     = row_names,
+    column_names  = column_names,
+    group_labels  = group_labels,
+    method        = opts$method,
+    reference     = opts$reference,
+    chunk_size    = opts$`chunk-size`
+  )
 
-  # 6. Run FindAllMarkers
-  markers <- diff_abundance_seurat(obj, method = opts$method)
-
-  if (is.null(markers) || nrow(markers) == 0) {
-    stop("FindAllMarkers returned no results — check that groups have enough cells")
+  if (is.null(da_result$all_results) || nrow(da_result$all_results) == 0) {
+    stop("Chunked DA returned no results — check that groups have enough cells")
   }
 
-  # 7. Convert to platform format
-  result <- format_markers_to_results(markers, method = opts$method, n_top = opts$`n-top-features`)
+  # 6. Apply BH FDR and format results
+  result <- adjust_and_format_results(
+    groups      = da_result$groups,
+    all_results = da_result$all_results,
+    method      = opts$method
+  )
 
-  # 8. Write output parquet — one row per (group, feature) with stats
-  out_rows <- list()
-  for (g in names(result$results_by_group)) {
-    rd <- result$results_by_group[[g]]
-    n <- length(rd$names)
-    out_rows[[g]] <- data.frame(
-      group     = rep(g, n),
-      name      = rd$names,
-      score     = rd$scores,
-      logfoldchange = rd$logfoldchanges,
-      pval      = rd$pvals,
-      pval_adj  = rd$pvals_adj,
-      stringsAsFactors = FALSE
-    )
-  }
-  out_df <- do.call(rbind, out_rows)
+  # 7. Write output parquet — all features with pval_adj
+  out_df <- da_result$all_results
+  out_df$pval_adj <- p.adjust(out_df$pval, method = "BH")
   arrow::write_parquet(out_df, opts$`output-parquet`)
 
   # Preserve original TSV schemas
   writeLines(row_names,    opts$`output-row`)
   writeLines(column_names, opts$`output-column`)
 
-  # 9. Truncate results_by_group for metadata (full data is in parquet)
+  # 8. Truncate results_by_group for metadata (full data is in parquet)
   metadata_top_n <- 200L
   truncated_results <- lapply(result$results_by_group, function(grp) {
     n_keep <- min(metadata_top_n, length(grp$names))
@@ -131,7 +135,7 @@ tryCatch({
     )
   })
 
-  # 10. Write sentinel
+  # 9. Write sentinel
   write_sentinel(list(
     serial_number    = opts$`serial-number`,
     dataset_uid      = opts$`dataset-uid`,
