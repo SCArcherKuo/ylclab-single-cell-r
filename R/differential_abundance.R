@@ -1,12 +1,12 @@
 #' Run differential abundance analysis via Seurat FindAllMarkers.
 #'
 #' @param obj Seurat object with identities set to the grouping variable.
-#' @param method One of: "bimod", "ROC", "t", "negbinom", "poisson", "LR", "MAST", "DESeq2".
+#' @param method One of: "bimod", "ROC", "negbinom", "poisson", "LR", "MAST", "DESeq2".
 #' @return Data frame from FindAllMarkers with columns: p_val, avg_log2FC, pct.1, pct.2,
 #'   p_val_adj, cluster, gene (and myAUC for ROC).
 #' @export
 diff_abundance_seurat <- function(obj, method) {
-  valid_methods <- c("bimod", "roc", "t", "negbinom", "poisson", "LR", "MAST", "DESeq2")
+  valid_methods <- c("bimod", "roc", "negbinom", "poisson", "LR", "MAST", "DESeq2")
   # FindAllMarkers uses lowercase "roc" for test.use but we accept "ROC" from the user
   test_use <- if (tolower(method) == "roc") "roc" else method
 
@@ -50,9 +50,7 @@ format_markers_to_results <- function(markers, method, n_top = 50L) {
       scores <- -log10(pvals) * sign(gdf$avg_log2FC)
     }
 
-    # Sort by absolute score descending (store ALL features, not just top N —
-    # the barchart top-N limiting is handled by the result formatter, and
-    # downstream steps like DAM-filtered DR need the full feature list)
+    # Sort by absolute score descending
     ord <- order(abs(scores), decreasing = TRUE)
     gdf <- gdf[ord, , drop = FALSE]
     scores <- scores[ord]

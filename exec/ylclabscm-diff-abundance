@@ -12,7 +12,7 @@ option_list <- list(
   make_option("--column-path",          type="character", help="Input column sample names TSV"),
   make_option("--metadata-path",        type="character", default="", help="Optional sample metadata CSV/parquet"),
   make_option("--cluster-labels-path",  type="character", default="", help="Cluster labels parquet from clustering step"),
-  make_option("--method",               type="character", help="bimod|ROC|t|negbinom|poisson|LR|MAST|DESeq2"),
+  make_option("--method",               type="character", help="bimod|ROC|negbinom|poisson|LR|MAST|DESeq2"),
   make_option("--group-by",             type="character", default="cluster", help="Metadata or cluster column for grouping"),
   make_option("--reference",            type="character", default="rest", help="Reference group for comparison"),
   make_option("--n-top-features",       type="integer",   default=50L, help="Number of top features per group"),
@@ -105,7 +105,7 @@ tryCatch({
       group     = rep(g, n),
       name      = rd$names,
       score     = rd$scores,
-      logfc     = rd$logfoldchanges,
+      logfoldchange = rd$logfoldchanges,
       pval      = rd$pvals,
       pval_adj  = rd$pvals_adj,
       stringsAsFactors = FALSE
@@ -118,7 +118,20 @@ tryCatch({
   writeLines(row_names,    opts$`output-row`)
   writeLines(column_names, opts$`output-column`)
 
-  # 9. Write sentinel
+  # 9. Truncate results_by_group for metadata (full data is in parquet)
+  metadata_top_n <- 200L
+  truncated_results <- lapply(result$results_by_group, function(grp) {
+    n_keep <- min(metadata_top_n, length(grp$names))
+    list(
+      names          = grp$names[seq_len(n_keep)],
+      scores         = grp$scores[seq_len(n_keep)],
+      logfoldchanges = grp$logfoldchanges[seq_len(n_keep)],
+      pvals          = grp$pvals[seq_len(n_keep)],
+      pvals_adj      = grp$pvals_adj[seq_len(n_keep)]
+    )
+  })
+
+  # 10. Write sentinel
   write_sentinel(list(
     serial_number    = opts$`serial-number`,
     dataset_uid      = opts$`dataset-uid`,
@@ -132,7 +145,7 @@ tryCatch({
     group_by         = group_by,
     reference        = opts$reference,
     groups           = result$groups,
-    results_by_group = result$results_by_group,
+    results_by_group = truncated_results,
     n_top_features   = opts$`n-top-features`
   ), opts$`output-sentinel`)
 
